@@ -1,0 +1,6 @@
+name: codeql/dart-all
+version: 0.0.1
+groups: dart
+dbscheme: dart.dbscheme
+extractor: dart
+library: true
