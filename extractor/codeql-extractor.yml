@@ -10,5 +10,4 @@ extractor_root: extractor
 index:
   per_file_command: 
     - ["../tools/index-files.cmd", "@FILE@"]  # Windows
-  batch_command:
     - ["../tools/index-files.sh", "@FILE@"]   # Linux

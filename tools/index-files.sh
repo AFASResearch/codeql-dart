@@ -2,7 +2,8 @@
 set -euo pipefail
 
 LIST="$1"
-EXE="$(dirname "$0")/../extractor/dart-extractor"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+EXE="$SCRIPT_DIR/../extractor/dart-extractor"
 
 echo "[index-files] CWD: $(pwd)"
 echo "[index-files] Using extractor: $EXE"
@@ -18,8 +19,8 @@ if [ ! -f "$LIST" ]; then
 fi
 
 while IFS= read -r FILE || [ -n "$FILE" ]; do
-  # skip empty lines
+  # Skip empty lines
   [ -z "$FILE" ] && continue
-
-  "$EXE" --index "$FILE"
+  echo "[index-files] Indexing file: $FILE"
+  "$EXE" --index "$FILE" || exit $?
 done < "$LIST"
