@@ -7,7 +7,7 @@ go build -o ..\dart-extractor.exe .\.
 
 codeql database init .\db-dart `
 --language=dart `
---search-path .\. `
+--search-path .\extractor `
 --source-root <your-project-root>
 
 # Index the files from the working dir
@@ -21,4 +21,4 @@ codeql database index-files .\db-dart `
 
 # Finalize the database with indexed files
 
-codeql database finalize --dbscheme=.\ql\lib\dart.dbscheme .\codeql-dart\db-dart
+codeql database finalize --dbscheme=.\dart\dart.dbscheme .\db-dart

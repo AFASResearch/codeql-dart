@@ -14,6 +14,48 @@ import (
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )
 
+// --- ID generation ------------------------------------------------------- // NEW
+
+type IdGen struct {
+	nextFileID     int
+	nextFunctionID int
+	nextStringID   int
+	nextIdentID    int
+	nextImportID   int
+}
+
+func (g *IdGen) NewFileID() int {
+	g.nextFileID++
+	return g.nextFileID
+}
+
+func (g *IdGen) NewFunctionID() int {
+	g.nextFunctionID++
+	return g.nextFunctionID
+}
+
+func (g *IdGen) NewStringID() int {
+	g.nextStringID++
+	return g.nextStringID
+}
+
+func (g *IdGen) NewIdentID() int {
+	g.nextIdentID++
+	return g.nextIdentID
+}
+
+func (g *IdGen) NewImportID() int {
+	g.nextImportID++
+	return g.nextImportID
+}
+
+// One global id generator is fine as long as you don't parallelise extraction.
+// If you later do, move IdGen into a per-worker struct.
+var globalIds IdGen            // NEW
+var fileIDs = map[string]int{} // NEW: path → file-id
+
+// ------------------------------------------------------------------------ //
+
 func firstEnv(keys ...string) string {
 	for _, k := range keys {
 		if v := os.Getenv(k); v != "" {
@@ -192,21 +234,23 @@ func indexOne(ctx context.Context, trapRoot, srcArcRoot, srcRoot, file string) e
 	}
 	defer w.Close()
 
-	if err := w.Emit("file", []any{trapPath}); err != nil {
+	// --- file() with id ----------------------------------------------------
+
+	trapFile := filepath.ToSlash(rel) // path as seen in dbscheme
+	fileID, ok := fileIDs[trapFile]
+	if !ok {
+		fileID = globalIds.NewFileID()
+		fileIDs[trapFile] = fileID
+		if err := w.Emit("file", []any{fileID, trapFile}); err != nil {
+			return err
+		}
+	}
+
+	// Walk AST and emit all other relations for this file
+	if err := extractDart(root, src, rel, w, fileID, &globalIds); err != nil { // CHANGED
 		return err
 	}
 
-	// Walk AST – count only; print once per file
-	funcsCnt, stringsCnt := 0, 0
-
-	trapFile := filepath.ToSlash(rel)
-
-	extractDart(root, src, rel, w)
-
-	// optional summary row
-	_ = w.Emit("file_stats", []any{trapFile, funcsCnt, stringsCnt})
-
-	fmt.Printf("OK %s (%d funcs, %d strings)\n", rel, funcsCnt, stringsCnt)
 	return nil
 }
 
@@ -287,7 +331,7 @@ func pos1(n *sitter.Node) (sl, sc, el, ec int) {
 //   part_decl(file, uri)
 //   part_of_decl(file, nameOrUri)
 
-func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) error {
+func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer, fileID int, ids *IdGen) error { // CHANGED
 	funcsCnt, stringsCnt := 0, 0
 	trapFile := filepath.ToSlash(rel)
 
@@ -320,7 +364,8 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 		return s
 	}
 
-	// anonymous function ids (stable per file order)
+	// anonymous function ids (stable per file order) – still used for names, but
+	// the real primary key is now the numeric function id.
 	anonFuncSeq := 0
 	newAnonId := func(n *sitter.Node) string {
 		anonFuncSeq++
@@ -330,9 +375,7 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 
 	// Best-effort: detect async/sync*/async* on a function-like node
 	funcAsyncKind := func(n *sitter.Node) string {
-		// Try field "modifier" or a child token "async"/"sync" and star
 		full := textOf(n)
-		// quick scans; cheap & robust
 		if strings.Contains(full, "async*") {
 			return "async*"
 		}
@@ -346,7 +389,7 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 	}
 
 	// collect parameters from common shapes
-	emitParams := func(funcId string, fn *sitter.Node) {
+	emitParams := func(funcID int, funcName string, fn *sitter.Node) {
 		// Try a field first
 		formals := fn.ChildByFieldName("parameters")
 		if formals == nil {
@@ -360,19 +403,15 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 			return
 		}
 
-		// We’ll walk all children and pick nodes that look like parameters.
-		// Typical kinds: "simple_formal_parameter", "default_formal_parameter", "field_formal_parameter", "named_parameter"
 		idx := 0
 		var walkParams func(n *sitter.Node)
 		walkParams = func(n *sitter.Node) {
 			kind := n.Kind()
 			switch kind {
 			case "simple_formal_parameter", "field_formal_parameter":
-				// name is usually a field "name" or last identifier token
 				nameNode := n.ChildByFieldName("name")
 				name := textOf(nameNode)
 				if name == "" {
-					// fallback: scan identifiers
 					for i := uint(0); i < n.ChildCount(); i++ {
 						if ch := n.Child(i); ch != nil && strings.Contains(ch.Kind(), "identifier") {
 							name = textOf(ch)
@@ -382,12 +421,10 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 				}
 				hasDefault, defTxt := false, ""
 				kindTag := "positional"
-				_ = w.Emit("param", []any{trapFile, funcId, idx, name, kindTag, hasDefault, defTxt})
+				_ = w.Emit("param", []any{fileID, funcID, idx, name, kindTag, hasDefault, defTxt})
 				idx++
 
 			case "default_formal_parameter":
-				// Often wraps another param + "=" + value
-				// try: field "parameter", field "default_value"
 				p := n.ChildByFieldName("parameter")
 				name := ""
 				if p != nil {
@@ -405,19 +442,16 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 				def := n.ChildByFieldName("default_value")
 				defTxt := shrink(textOf(def), 200)
 				kindTag := "positional"
-				_ = w.Emit("param", []any{trapFile, funcId, idx, name, kindTag, true, defTxt})
+				_ = w.Emit("param", []any{fileID, funcID, idx, name, kindTag, true, defTxt})
 				idx++
 
 			case "named_parameter", "named_formal_parameters":
-				// {a, b = 1} or {required c}
 				for i := uint(0); i < n.ChildCount(); i++ {
 					ch := n.Child(i)
 					if ch == nil {
 						continue
 					}
 					if ch.Kind() == "default_formal_parameter" {
-						// recurse to reuse handling above but mark as named
-						// quick extract
 						p := ch.ChildByFieldName("parameter")
 						name := ""
 						if p != nil {
@@ -434,7 +468,7 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 						}
 						def := ch.ChildByFieldName("default_value")
 						defTxt := shrink(textOf(def), 200)
-						_ = w.Emit("param", []any{trapFile, funcId, idx, name, "named", true, defTxt})
+						_ = w.Emit("param", []any{fileID, funcID, idx, name, "named", true, defTxt})
 						idx++
 					} else if ch.Kind() == "simple_formal_parameter" || ch.Kind() == "field_formal_parameter" {
 						name := ""
@@ -448,13 +482,12 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 								}
 							}
 						}
-						_ = w.Emit("param", []any{trapFile, funcId, idx, name, "named", false, ""})
+						_ = w.Emit("param", []any{fileID, funcID, idx, name, "named", false, ""})
 						idx++
 					}
 				}
 
 			default:
-				// descend to catch nested param nodes
 				for i := uint(0); i < n.ChildCount(); i++ {
 					if ch := n.Child(i); ch != nil {
 						walkParams(ch)
@@ -465,7 +498,7 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 		walkParams(formals)
 	}
 
-	emitFunction := func(n *sitter.Node, explicitName string) string {
+	emitFunction := func(n *sitter.Node, explicitName string) int {
 		funcsCnt++
 		name := explicitName
 		if name == "" {
@@ -477,42 +510,38 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 			name = newAnonId(n)
 		}
 		sl, sc, el, ec := emitPos(n)
-		_ = w.Emit("functions", []any{trapFile, name, sl, sc, el, ec})
+		funcID := ids.NewFunctionID()
+		_ = w.Emit("functions", []any{funcID, fileID, name, sl, sc, el, ec})
 		if ak := funcAsyncKind(n); ak != "" {
-			_ = w.Emit("func_async_kind", []any{trapFile, name, ak})
+			_ = w.Emit("func_async_kind", []any{funcID, ak})
 		}
-		emitParams(name, n)
-		return name
+		emitParams(funcID, name, n)
+		return funcID
 	}
 
 	emitCall := func(n *sitter.Node) {
-		// Find argument list
+		// unchanged, except still using trapFile for callId/call_* relations,
+		// which you can later move to id-based too if you add them to dbscheme.
 		args := n.ChildByFieldName("arguments")
 		if args == nil {
-			// fallback to common kind
 			args = childByKind(n, "argument_list")
 		}
 		if args == nil {
 			return
 		}
 
-		// Callee text: try a "function" / "target" / "receiver" field, else take the prefix before args
 		var callee string
 		if fn := n.ChildByFieldName("function"); fn != nil {
 			callee = textOf(fn)
 		} else if t := n.ChildByFieldName("target"); t != nil {
-			// method_invocation: target.method(arguments)
-			// sometimes the method name is a separate field "method"
 			if m := n.ChildByFieldName("method"); m != nil {
 				callee = textOf(t) + "." + textOf(m)
 			} else {
-				// best effort
 				callee = textOf(t)
 			}
 		} else if r := n.ChildByFieldName("receiver"); r != nil {
 			callee = textOf(r)
 		} else {
-			// fallback: take text from start of node to start of args
 			start := n.StartByte()
 			if args != nil {
 				callee = string(src[start:args.StartByte()])
@@ -524,7 +553,6 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 		callId := fmt.Sprintf("%s:%d:%d-%d:%d#call", trapFile, sl, sc, el, ec)
 		_ = w.Emit("call_expr", []any{trapFile, callId, shrink(callee, 300), sl, sc, el, ec})
 
-		// Extract args: positional and named
 		idx := 0
 		for i := uint(0); i < args.NamedChildCount(); i++ {
 			arg := args.NamedChild(i)
@@ -534,7 +562,6 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 			ak := arg.Kind()
 			switch ak {
 			case "named_argument":
-				// Usually: label ":" expr   with field "name" or "label"
 				lbl := ""
 				if ln := arg.ChildByFieldName("name"); ln != nil {
 					lbl = textOf(ln)
@@ -542,7 +569,6 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 					lbl = textOf(ln)
 					lbl = strings.TrimSuffix(lbl, ":")
 				} else {
-					// fallback: first identifier followed by ":"
 					for j := uint(0); j < arg.ChildCount(); j++ {
 						if id := arg.Child(j); id != nil && strings.Contains(id.Kind(), "identifier") {
 							lbl = textOf(id)
@@ -550,10 +576,8 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 						}
 					}
 				}
-				// value expression
 				val := arg.ChildByFieldName("value")
 				if val == nil {
-					// often value is the last child
 					if arg.ChildCount() > 0 {
 						val = arg.Child(arg.ChildCount() - 1)
 					}
@@ -561,7 +585,6 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 				_ = w.Emit("call_named_arg", []any{trapFile, callId, lbl, shrink(textOf(val), 400)})
 
 			default:
-				// treat as positional
 				_ = w.Emit("call_arg", []any{trapFile, callId, idx, shrink(textOf(arg), 400)})
 				idx++
 			}
@@ -569,12 +592,9 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 	}
 
 	emitImportish := func(n *sitter.Node) {
-		// Handle import/export/part directives. Grammar names vary; try a few.
-		// try to classify this string literal as an import/export/part URI
 		if dir := findDirectiveAncestor(n, 3); dir != nil {
 			trimmed := strings.TrimLeft(textOf(dir), " \t\r\n")
 
-			// extract prefix (from a dedicated field if present, else text)
 			prefix := ""
 			if p := dir.ChildByFieldName("prefix"); p != nil {
 				prefix = textOf(p)
@@ -595,19 +615,18 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 				}
 			}
 
-			// this string literal is the URI token; use its own span & text
 			usl, usc, uel, uec := pos1(n)
-			uriText := string(src[n.StartByte():n.EndByte()]) // keep quotes to match your string_lit
+			uriText := string(src[n.StartByte():n.EndByte()])
 
 			switch {
 			case strings.HasPrefix(trimmed, "import"):
-				_ = w.Emit("imports", []any{trapFile, prefix, uriText, usl, usc, uel, uec})
+				_ = w.Emit("imports", []any{fileID, prefix, uriText, usl, usc, uel, uec})
 			case strings.HasPrefix(trimmed, "export"):
-				_ = w.Emit("exports", []any{trapFile, uriText, usl, usc, uel, uec}) // if in your scheme
+				_ = w.Emit("exports", []any{fileID, uriText, usl, usc, uel, uec})
 			case strings.HasPrefix(trimmed, "part of"):
-				_ = w.Emit("part_of_decl", []any{trapFile, uriText, usl, usc, uel, uec}) // or name token if not quoted
+				_ = w.Emit("part_of_decl", []any{fileID, uriText, usl, usc, uel, uec})
 			case strings.HasPrefix(trimmed, "part "):
-				_ = w.Emit("part_decl", []any{trapFile, uriText, usl, usc, uel, uec})
+				_ = w.Emit("part_decl", []any{fileID, uriText, usl, usc, uel, uec})
 			}
 		}
 
@@ -622,18 +641,20 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 		}
 		kind := n.Kind()
 
-		// string literals
+		// string literals with id + fileID
 		if kind == "string_literal" {
 			stringsCnt++
 			sl, sc, el, ec := emitPos(n)
 			txt := textOf(n)
-			_ = w.Emit("string_literals", []any{trapFile, sl, sc, el, ec, shrink(txt, 200)})
+			strID := ids.NewStringID()
+			_ = w.Emit("string_literals", []any{strID, fileID, shrink(txt, 200), sl, sc, el, ec})
 		}
 
-		// identifier occurrences (best-effort)
+		// identifier occurrences with id + fileID
 		if strings.Contains(kind, "identifier") {
 			sl, sc, el, ec := emitPos(n)
-			_ = w.Emit("ident_occurs", []any{trapFile, textOf(n), sl, sc, el, ec})
+			identID := ids.NewIdentID()
+			_ = w.Emit("ident_occurs", []any{identID, fileID, textOf(n), sl, sc, el, ec})
 		}
 
 		// imports/exports/parts
@@ -650,14 +671,13 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 			_ = emitFunction(n, "")
 		}
 
-		// call-ish nodes: "call_expression", "method_invocation", "function_expression_invocation"
+		// call-ish nodes
 		if strings.Contains(kind, "call_expression") ||
 			strings.Contains(kind, "method_invocation") ||
 			strings.Contains(kind, "invocation") {
 			emitCall(n)
 		}
 
-		// Recurse
 		for i := uint(0); i < n.ChildCount(); i++ {
 			if ch := n.Child(i); ch != nil {
 				walk(ch)
@@ -667,7 +687,7 @@ func extractDart(root *sitter.Node, src []byte, rel string, w *trap.Writer) erro
 
 	walk(root)
 
-	_ = w.Emit("file_stats", []any{trapFile, funcsCnt, stringsCnt})
+	_ = w.Emit("file_stats", []any{fileID, funcsCnt, stringsCnt}) // CHANGED: fileID, not path
 	fmt.Printf("OK %s (%d funcs, %d strings)\n", rel, funcsCnt, stringsCnt)
 	return nil
 }

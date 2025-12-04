@@ -1,0 +1,7 @@
+name: nvanderwaal/dart-queries
+version: 0.0.1
+library: false
+groups: dart
+extractor: dart
+dependencies:
+  nvanderwaal/dart-all: "*"

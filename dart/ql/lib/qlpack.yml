@@ -1,0 +1,6 @@
+name: nvanderwaal/dart-all
+version: 0.0.1
+library: true
+groups: dart
+dbscheme: dart.dbscheme
+extractor: dart
