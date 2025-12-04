@@ -28,6 +28,10 @@ doc/api/
 .flutter-plugins
 .flutter-plugins-dependencies
 
+
 db-dart/
 logs/
 log/
+
+dart/ql/lib/codeql-pack.lock.yml
+dart/ql/queries/codeql-pack.lock.yml
