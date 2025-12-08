@@ -2,8 +2,7 @@
 set -euo pipefail
 
 LIST="$1"
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-EXE="$SCRIPT_DIR/../extractor/dart-extractor"
+EXE="$(pwd)/extractor/dart-extractor"
 
 echo "[index-files] CWD: $(pwd)"
 echo "[index-files] Using extractor: $EXE"
