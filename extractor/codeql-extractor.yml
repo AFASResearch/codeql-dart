@@ -1,13 +1,12 @@
 name: "dart"
 display_name: "Dart"
 version: 0.0.1
+github_api_languages:
+  - Dart
+scc_languages:
+  - Dart
 file_types:
   - name: dart
     display_name: Dart
     extensions: 
       - .dart
-extractor_root: extractor
-index:
-  index_command: 
-    - ["../tools/index-files.cmd", "@FILE@"]  # Windows
-    - ["../tools/index-files.sh", "@FILE@"]   # Linux
